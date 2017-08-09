@@ -1,12 +1,12 @@
-from __future__ import print_function
 import json
 import os
 import re
 import urllib2
 import urlparse
 from burp import IBurpExtender
-from burp import IExtensionStateListener
 from burp import IContextMenuFactory
+from burp import IExtensionStateListener
+from burp import IMessageEditorController
 from burp import IScanIssue
 from burp import IScannerCheck
 from burp import ITab
@@ -17,6 +17,8 @@ from java.awt import EventQueue
 from java.awt.event import ActionListener
 from java.awt.event import MouseAdapter
 from java.lang import Runnable
+from java.lang import Object
+from java.lang import Thread
 from javax.swing import DefaultCellEditor
 from javax.swing import JCheckBox
 from javax.swing import JEditorPane
@@ -103,11 +105,12 @@ class View:
         self.issues = issues.get_issues()
         self.scanner_issues = issues.get_scanner_issues()
         self.scanner_panes = {}
-        self.scanner_tables = {}
+        self.scanner_table_models = {}
         self.is_scanner_panes = []
 
         self.set_vuln_tree()
         self.set_tree()
+        self.set_scanner_table_models()
         self.set_scanner_panes()
         self.set_pane()
         self.set_tsl()
@@ -169,21 +172,26 @@ class View:
     def get_tree(self):
         return self.tree
 
-    # Creates the tabs dynamically using data from the JSON file
-    def set_scanner_panes(self):
+    def set_scanner_table_models(self):
         issues = self.issues
 
         for issue in issues:
             issue_name = issue["name"]
             issue_param = issue["param"]
 
+            self.create_scanner_table_model(issue_name, issue_param)
+
+    # Creates the tabs dynamically using data from the JSON file
+    def set_scanner_panes(self):
+        for issue in self.issues:
+            issue_name = issue["name"]
+            issue_param = issue["param"]
             key = issue_name + "." + issue_param
 
             top_pane = self.create_request_list_pane(issue_name)
             bottom_pane = self.create_tabbed_pane()
 
             scanner_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT, top_pane, bottom_pane)
-
             self.scanner_panes[key] = scanner_pane
 
     def get_scanner_panes(self):
@@ -233,42 +241,60 @@ class View:
     def get_pane(self):
         return self.pane
 
-    def set_scanner_table(self, scanner_pane, scanner_table):
-        self.scanner_tables[scanner_pane] = scanner_table
+    # TODO: Move all scanner table functions into its own ScannerTable class
+    #       as well as ScannerTableModel for all scanner table model functions
+    def create_scanner_table_model(self, issue_name, issue_param):
+        key = issue_name + "." + issue_param
+        is_model_exists = key in self.scanner_table_models
 
-    def get_scanner_table(self, scanner_pane):
-        return self.scanner_tables[scanner_pane]
-
-    def set_scanner_pane(self, scanner_pane):
-        request_table_pane = scanner_pane.getTopComponent()
-        scanner_table = self.get_scanner_table(scanner_pane)
-
-        request_table_pane.getViewport().setView(scanner_table)
-        request_table_pane.revalidate()
-        request_table_pane.repaint()
-
-    def create_scanner_pane(self, scanner_pane, issue_name, issue_param):
-        scanner_issues = self.get_scanner_issues()
-        request_table_pane = scanner_pane.getTopComponent()
+        if is_model_exists:
+            return
 
         scanner_table_model = ScannerTableModel()
         scanner_table_model.addColumn("Checked")
         scanner_table_model.addColumn("Host")
         scanner_table_model.addColumn("Path")
 
-        # Search all issues for the correct issue. Once found, add it into
-        # the scanner table model to be showed in the UI.
-        for scanner_issue in scanner_issues:
-            is_same_name = scanner_issue.getIssueName() == issue_name
-            is_same_param = scanner_issue.getParameter() == issue_param
-            is_same_issue = is_same_name and is_same_param
+        self.scanner_table_models[key] = scanner_table_model
 
-            if is_same_issue:
-                scanner_table_model.addRow([
-                    False,
-                    scanner_issue.getHttpService().getHost(),
-                    scanner_issue.getUrl()
-                ])
+    def set_scanner_table_model(self, scanner_issue, issue_name, issue_param):
+        key = issue_name + "." + issue_param
+        scanner_table_model = self.scanner_table_models[key]
+
+        # Using the addRow() method requires that the data type being passed to be of type
+        # Vector() or Object(). Passing a Python object of type list in addRow causes a type
+        # conversion error of sorts which presents as an ArrayOutOfBoundsException. Therefore,
+        # row is an instantiation of Object() to avoid this error.
+        row = Object()
+        row = [False, scanner_issue.getHttpService().getHost(), scanner_issue.getUrl()]
+        scanner_table_model.addRow(row)
+
+        # Wait for ScannerTableModel to update as to not get an ArrayOutOfBoundsException.
+        Thread.sleep(500)
+
+        scanner_table_model.fireTableDataChanged()
+        scanner_table_model.fireTableStructureChanged()
+
+    def get_scanner_table_model(self, issue_name, issue_param):
+        key = issue_name + "." + issue_param
+        return self.scanner_table_models[key]
+
+    def set_scanner_pane(self, scanner_pane, issue_name, issue_param):
+        request_table_pane = scanner_pane.getTopComponent()
+        key = issue_name + "." + issue_param
+        is_scanner_table_exists = key in self.scanner_table_models
+
+        if is_scanner_table_exists:
+            scanner_table = self.create_scanner_pane(scanner_pane, issue_name, issue_param)
+        else:
+            scanner_table = self.get_scanner_pane(request_table_pane)
+
+        request_table_pane.getViewport().setView(scanner_table)
+        request_table_pane.revalidate()
+        request_table_pane.repaint()
+
+    def create_scanner_pane(self, scanner_pane, issue_name, issue_param):
+        scanner_table_model = self.get_scanner_table_model(issue_name, issue_param)
 
         scanner_table = JTable(scanner_table_model)
         scanner_table.getColumnModel().getColumn(0).setCellEditor(DefaultCellEditor(JCheckBox()))
@@ -278,11 +304,7 @@ class View:
         scanner_table_list_listener = IssueListener(self, scanner_table, scanner_pane, issue_name, issue_param)
         scanner_table.getSelectionModel().addListSelectionListener(scanner_table_list_listener)
 
-        self.set_scanner_table(scanner_pane, scanner_table)
-
-        request_table_pane.getViewport().setView(scanner_table)
-        request_table_pane.revalidate()
-        request_table_pane.repaint()
+        return scanner_table
 
     def set_tabbed_pane(self, scanner_pane, request_list, issue_url, issue_name, issue_param):
         tabbed_pane = scanner_pane.getBottomComponent()
@@ -494,33 +516,12 @@ class TSL(TreeSelectionListener):
                 key = issue_name + "." + issue_param
                 scanner_pane = self.scanner_panes[key]
 
-                # Check there are any scanner panes.
-                is_scanner_panes = self.view.get_is_scanner_panes()
-
-                # Create scanner pane for the first time.
-                if not is_scanner_panes:
-                    self.view.create_scanner_pane(scanner_pane, issue_name, issue_param)
-                    self.view.set_is_scanner_pane(scanner_pane)
-                    print("Create first scanner pane")
-                else:
-                    # Check if the scanner pane exists.
-                    is_scanner_pane = self.view.get_is_scanner_pane(scanner_pane)
-
-                    # If the scanner pane exists, go ahead and show it.
-                    if is_scanner_pane:
-                        self.view.set_scanner_pane(scanner_pane)
-                        print("Scanner pane exists")
-                    # Else, create a new scanner pane and keep track of it.
-                    else:
-                        self.view.create_scanner_pane(scanner_pane, issue_name, issue_param)
-                        self.view.set_is_scanner_pane(scanner_pane)
-                        print("Scanner pane does not exist so make one")
-
+                self.view.set_scanner_pane(scanner_pane, issue_name, issue_param)
                 pane.setRightComponent(scanner_pane)
             else:
-                print("No description for " + issue_name + " " + issue_param)
+                print "No description for " + issue_name + " " + issue_param
         else:
-            print("Cannot set a pane for " + issue_name + " " + issue_param)
+            print "Cannot set a pane for " + issue_name + " " + issue_param
 
 class IssueListener(ListSelectionListener):
     def __init__(self, view, table, scanner_pane, issue_name, issue_param):
@@ -659,6 +660,8 @@ class Issues:
                 scanner_issue = ScannerIssue(url, issue_name, issue_param, http_service, http_messages, detail, severity, request_response)
                 self.set_scanner_issues(scanner_issue)
                 self.add_scanner_count(view, issue_name, issue_param, issue_count, self.total_count[issue_name])
+
+                view.set_scanner_table_model(scanner_issue, issue_name, issue_param)
 
     def check_duplicate_issue(self, url, parameter, issue_name):
         issues = self.get_scanner_issues()
