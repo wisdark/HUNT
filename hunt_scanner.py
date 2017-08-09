@@ -604,10 +604,17 @@ class Issues:
                     is_same_vuln_name = vuln_param == parameter_decoded
 
                     if is_same_vuln_name:
-                        vuln_params.append(issue)
+                        vuln_params.append({
+                            "issue": issue,
+                            "param_value": parameter.getValue()
+                        })
                     else:
                         url = "http://api.pearson.com/v2/dictionaries/ldoce5/entries?headword=" + parameter_decoded
                         response = urllib2.urlopen(url)
+
+                        # Wait a second for response to come back
+                        Thread.sleep(1000)
+
                         data = json.load(response)
                         is_real_word = int(data["count"]) > 0
 
@@ -615,7 +622,10 @@ class Issues:
                         # Catches: id_param, param_id, paramID, etc.
                         # Does not catch: idea, ideology, identify, etc.
                         if not is_real_word:
-                            vuln_params.append(issue)
+                            vuln_params.append({
+                                "issue": issue,
+                                "param_value": parameter.getValue()
+                            })
 
         return vuln_params
 
@@ -625,11 +635,14 @@ class Issues:
             issues = self.get_issues()
             json = self.get_json()
 
-            issue_name = vuln_parameter["name"]
-            issue_param = vuln_parameter["param"]
+            current_issue = vuln_parameter["issue"]
+            param_value = vuln_parameter["param_value"]
+            issue_name = current_issue["name"]
+            issue_param = current_issue["param"]
 
             url = helpers.analyzeRequest(request_response).getUrl()
             url = urlparse.urlsplit(str(url))
+            hostname = url.hostname
             url = url.scheme + "://" + url.hostname + url.path
 
             http_service = request_response.getHttpService()
@@ -637,9 +650,10 @@ class Issues:
             detail = json["issues"][issue_name]["detail"]
             severity = "Medium"
 
-            is_not_dupe = self.check_duplicate_issue(url, issue_param, issue_name)
+            is_dupe = self.check_duplicate_issue(hostname, issue_name, issue_param, param_value)
 
-            if is_not_dupe:
+            # TODO: Fix nesting
+            if not is_dupe:
                 for issue in issues:
                     is_name = issue["name"] == issue_name
                     is_param = issue["param"] == issue_param
@@ -657,25 +671,27 @@ class Issues:
 
                         break
 
-                scanner_issue = ScannerIssue(url, issue_name, issue_param, http_service, http_messages, detail, severity, request_response)
+                scanner_issue = ScannerIssue(url, issue_name, issue_param, param_value, http_service, http_messages, detail, severity, request_response)
                 self.set_scanner_issues(scanner_issue)
                 self.add_scanner_count(view, issue_name, issue_param, issue_count, self.total_count[issue_name])
 
                 view.set_scanner_table_model(scanner_issue, issue_name, issue_param)
 
-    def check_duplicate_issue(self, url, parameter, issue_name):
+    def check_duplicate_issue(self, hostname, issue_name, parameter, value):
         issues = self.get_scanner_issues()
 
         for issue in issues:
-            is_same_url = url == issue.getUrl()
-            is_same_parameter = parameter == issue.getParameter()
+            url = urlparse.urlsplit(str(issue.getUrl()))
+            is_same_hostname = hostname == url.hostname
             is_same_issue_name = issue_name == issue.getIssueName()
-            is_dupe = is_same_url and is_same_parameter and is_same_issue_name
+            is_same_parameter = parameter == issue.getParameter()
+            is_same_value = value == issue.getParameterValue()
+            is_dupe = is_same_hostname and is_same_parameter and is_same_issue_name and is_same_value
 
             if is_dupe:
-                return False
+                return True
 
-        return True
+        return False
 
     # Refactor as same code is used in set_scanner_count()
     def add_scanner_count(self, view, issue_name, issue_param, issue_count, total_count):
@@ -782,7 +798,7 @@ class Issues:
 
 # TODO: Fill out all the getters with proper returns
 class ScannerIssue(IScanIssue):
-    def __init__(self, url, issue_name, parameter, http_service, http_messages, detail, severity, request_response):
+    def __init__(self, url, issue_name, parameter, param_value, http_service, http_messages, detail, severity, request_response):
         self.current_url = url
         self.http_service = http_service
         self.http_messages = http_messages
@@ -792,6 +808,7 @@ class ScannerIssue(IScanIssue):
         self.issue_background = "Bugcrowd"
         self.issue_name = issue_name
         self.parameter = parameter
+        self.param_value = param_value
         self.remediation_background = ""
 
     def getRequestResponse(self):
@@ -799,6 +816,9 @@ class ScannerIssue(IScanIssue):
 
     def getParameter(self):
         return self.parameter
+
+    def getParameterValue(self):
+        return self.param_value
 
     def getUrl(self):
         return self.current_url
