@@ -49,9 +49,10 @@ class Run(Runnable):
     def run(self):
         self.runner()
 
-class BurpExtender(IBurpExtender, IExtensionStateListener, IContextMenuFactory, IScannerCheck, ITab, ITextEditor):
+class BurpExtender(IBurpExtender, IExtensionStateListener, IScannerCheck, ITab, ITextEditor):
     EXTENSION_NAME = "HUNT - Scanner"
 
+    # TODO: Figure out why this gets called twice
     def __init__(self):
         self.issues = Issues()
         self.view = View(self.issues)
@@ -64,7 +65,6 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IContextMenuFactory, 
         self.callbacks.registerExtensionStateListener(self)
         self.callbacks.setExtensionName(self.EXTENSION_NAME)
         self.callbacks.addSuiteTab(self)
-        self.callbacks.registerContextMenuFactory(self)
         self.callbacks.registerScannerCheck(self)
 
     def doPassiveScan(self, request_response):
@@ -73,8 +73,8 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IContextMenuFactory, 
         request = self.helpers.analyzeRequest(raw_request)
         response = self.helpers.analyzeResponse(raw_response)
 
+
         parameters = request.getParameters()
-        url = self.helpers.analyzeRequest(request_response).getUrl()
         vuln_parameters = self.issues.check_parameters(self.helpers, parameters)
 
         is_not_empty = len(vuln_parameters) > 0
@@ -85,9 +85,6 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IContextMenuFactory, 
         # Do not show any Bugcrowd found issues in the Scanner window
         return []
 
-    def createMenuItems(self, invocation):
-        return self.view.get_context_menu()
-
     def getTabCaption(self):
         return self.EXTENSION_NAME
 
@@ -95,7 +92,7 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IContextMenuFactory, 
         return self.view.get_pane()
 
     def extensionUnloaded(self):
-        print("HUNT - Scanner plugin unloaded")
+        print "HUNT - Scanner plugin unloaded"
         return
 
 class View:
@@ -485,7 +482,6 @@ class TSL(TreeSelectionListener):
         self.pane = view.get_pane()
         self.scanner_issues = view.get_scanner_issues()
         self.scanner_panes = view.get_scanner_panes()
-        print("works")
 
     def valueChanged(self, tse):
         pane = self.pane
@@ -580,7 +576,6 @@ class Issues:
 
     def check_parameters(self, helpers, parameters):
         vuln_params = []
-        issues = self.get_issues()
 
         for parameter in parameters:
             # Make sure that the parameter is not from the cookies
@@ -595,8 +590,9 @@ class Issues:
                 continue
 
             # TODO: Clean up the gross nested if statements
+            # TODO: Think of a better way to store the param_value to be passed on to create_scanner_issues
             # Check to see if the current parameter is a potentially vuln parameter
-            for issue in issues:
+            for issue in self.issues:
                 vuln_param = issue["param"]
                 is_vuln_found = re.search(vuln_param, parameter_decoded, re.IGNORECASE)
 
@@ -605,8 +601,9 @@ class Issues:
 
                     if is_same_vuln_name:
                         vuln_params.append({
-                            "issue": issue,
-                            "param_value": parameter.getValue()
+                            "name": issue["name"],
+                            "param": issue["param"],
+                            "value": parameter.getValue()
                         })
                     else:
                         url = "http://api.pearson.com/v2/dictionaries/ldoce5/entries?headword=" + parameter_decoded
@@ -623,22 +620,22 @@ class Issues:
                         # Does not catch: idea, ideology, identify, etc.
                         if not is_real_word:
                             vuln_params.append({
-                                "issue": issue,
-                                "param_value": parameter.getValue()
+                                "name": issue["name"],
+                                "param": issue["param"],
+                                "value": parameter.getValue()
                             })
 
         return vuln_params
 
     def create_scanner_issues(self, view, callbacks, helpers, vuln_parameters, request_response):
+        issues = self.issues
+        json = self.json
+
         # Takes into account if there is more than one vulnerable parameter
         for vuln_parameter in vuln_parameters:
-            issues = self.get_issues()
-            json = self.get_json()
-
-            current_issue = vuln_parameter["issue"]
-            param_value = vuln_parameter["param_value"]
-            issue_name = current_issue["name"]
-            issue_param = current_issue["param"]
+            issue_name = vuln_parameter["name"]
+            param_name = vuln_parameter["param"]
+            param_value = vuln_parameter["value"]
 
             url = helpers.analyzeRequest(request_response).getUrl()
             url = urlparse.urlsplit(str(url))
@@ -650,34 +647,20 @@ class Issues:
             detail = json["issues"][issue_name]["detail"]
             severity = "Medium"
 
-            is_dupe = self.check_duplicate_issue(hostname, issue_name, issue_param, param_value)
+            is_dupe = self.check_duplicate_issue(hostname, issue_name, param_name, param_value)
 
-            # TODO: Fix nesting
-            if not is_dupe:
-                for issue in issues:
-                    is_name = issue["name"] == issue_name
-                    is_param = issue["param"] == issue_param
-                    is_issue = is_name and is_param
+            if is_dupe:
+                continue
 
-                    if is_issue:
-                        issue["count"] += 1
-                        issue_count = issue["count"]
-                        is_key_exists = issue_name in self.total_count
+            scanner_issue = ScannerIssue(url, issue_name, param_name, param_value, http_service, http_messages, detail, severity, request_response)
+            self.set_scanner_issues(scanner_issue)
+            issue_count = self.add_scanner_count(view, issue_name, param_name)
+            self.create_scanner_count(view, issue_name, param_name, issue_count, self.total_count[issue_name])
 
-                        if is_key_exists:
-                            self.total_count[issue_name] += 1
-                        else:
-                            self.total_count[issue_name] = issue_count
-
-                        break
-
-                scanner_issue = ScannerIssue(url, issue_name, issue_param, param_value, http_service, http_messages, detail, severity, request_response)
-                self.set_scanner_issues(scanner_issue)
-                self.add_scanner_count(view, issue_name, issue_param, issue_count, self.total_count[issue_name])
-
-                view.set_scanner_table_model(scanner_issue, issue_name, issue_param)
+            view.set_scanner_table_model(scanner_issue, issue_name, param_name)
 
     def check_duplicate_issue(self, hostname, issue_name, parameter, value):
+        # TODO: Change to scanner_issues
         issues = self.get_scanner_issues()
 
         for issue in issues:
@@ -694,11 +677,25 @@ class Issues:
         return False
 
     # Refactor as same code is used in set_scanner_count()
-    def add_scanner_count(self, view, issue_name, issue_param, issue_count, total_count):
-        issues = self.get_issues()
-        scanner_issues = self.get_scanner_issues()
+    def add_scanner_count(self, view, issue_name, issue_param):
+        for issue in self.issues:
+            is_name = issue["name"] == issue_name
+            is_param = issue["param"] == issue_param
+            is_issue = is_name and is_param
 
-        tree = view.get_pane().getLeftComponent().getViewport().getView()
+            if is_issue:
+                issue["count"] += 1
+                is_key_exists = issue_name in self.total_count
+
+                if is_key_exists:
+                    self.total_count[issue_name] += 1
+                else:
+                    self.total_count[issue_name] = 1
+
+                return issue["count"]
+
+    def create_scanner_count(self, view, issue_name, issue_param, issue_count, total_count):
+        tree = view.get_tree()
         model = tree.getModel()
         root = model.getRoot()
         count = int(root.getChildCount())
@@ -742,9 +739,6 @@ class Issues:
                 break
 
     def set_scanner_count(self, view, is_checked, issue_name, issue_param):
-        issues = self.get_issues()
-        scanner_issues = self.get_scanner_issues()
-
         tree = view.get_tree()
         model = tree.getModel()
         root = model.getRoot()
