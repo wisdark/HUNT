@@ -49,6 +49,7 @@ class Run(Runnable):
     def run(self):
         self.runner()
 
+# TODO: Move other classes to different files
 class BurpExtender(IBurpExtender, IExtensionStateListener, IScannerCheck, ITab, ITextEditor):
     EXTENSION_NAME = "HUNT - Scanner"
 
@@ -72,7 +73,6 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IScannerCheck, ITab, 
         raw_response = request_response.getResponse()
         request = self.helpers.analyzeRequest(raw_request)
         response = self.helpers.analyzeResponse(raw_response)
-
 
         parameters = request.getParameters()
         vuln_parameters = self.issues.check_parameters(self.helpers, parameters)
@@ -103,6 +103,7 @@ class View:
         self.scanner_issues = issues.get_scanner_issues()
         self.scanner_panes = {}
         self.scanner_table_models = {}
+        self.scanner_tables = {}
         self.is_scanner_panes = []
 
         self.set_vuln_tree()
@@ -111,6 +112,9 @@ class View:
         self.set_scanner_panes()
         self.set_pane()
         self.set_tsl()
+
+    def get_issues_object(self):
+        return self.issues_object
 
     def set_callbacks(self, callbacks):
         self.callbacks = callbacks
@@ -126,9 +130,6 @@ class View:
 
     def get_scanner_issues(self):
         return self.scanner_issues
-
-    def set_scanner_count(self, is_checked, issue_name, issue_param):
-        self.issues_object.set_scanner_count(self, is_checked, issue_name, issue_param)
 
     def set_is_scanner_pane(self, scanner_pane):
         self.is_scanner_panes.append(scanner_pane)
@@ -240,6 +241,8 @@ class View:
 
     # TODO: Move all scanner table functions into its own ScannerTable class
     #       as well as ScannerTableModel for all scanner table model functions
+    # TODO: Add column for parameter name
+    # TODO: Fix path column to only show path. Use urllib2 to split URL.
     def create_scanner_table_model(self, issue_name, issue_param):
         key = issue_name + "." + issue_param
         is_model_exists = key in self.scanner_table_models
@@ -249,13 +252,14 @@ class View:
 
         scanner_table_model = ScannerTableModel()
         scanner_table_model.addColumn("Checked")
+        scanner_table_model.addColumn("Parameter")
         scanner_table_model.addColumn("Host")
         scanner_table_model.addColumn("Path")
 
         self.scanner_table_models[key] = scanner_table_model
 
-    def set_scanner_table_model(self, scanner_issue, issue_name, issue_param):
-        key = issue_name + "." + issue_param
+    def set_scanner_table_model(self, scanner_issue, issue_name, issue_param, vuln_param):
+        key = issue_name + "." + vuln_param
         scanner_table_model = self.scanner_table_models[key]
 
         # Using the addRow() method requires that the data type being passed to be of type
@@ -263,7 +267,7 @@ class View:
         # conversion error of sorts which presents as an ArrayOutOfBoundsException. Therefore,
         # row is an instantiation of Object() to avoid this error.
         row = Object()
-        row = [False, scanner_issue.getHttpService().getHost(), scanner_issue.getUrl()]
+        row = [False, issue_param, scanner_issue.getHttpService().getHost(), scanner_issue.getPath()]
         scanner_table_model.addRow(row)
 
         # Wait for ScannerTableModel to update as to not get an ArrayOutOfBoundsException.
@@ -277,20 +281,20 @@ class View:
         return self.scanner_table_models[key]
 
     def set_scanner_pane(self, scanner_pane, issue_name, issue_param):
-        request_table_pane = scanner_pane.getTopComponent()
         key = issue_name + "." + issue_param
-        is_scanner_table_exists = key in self.scanner_table_models
+        request_table_pane = scanner_pane.getTopComponent()
 
-        if is_scanner_table_exists:
-            scanner_table = self.create_scanner_pane(scanner_pane, issue_name, issue_param)
+        if key in self.scanner_tables:
+            scanner_table = self.scanner_tables[key]
         else:
-            scanner_table = self.get_scanner_pane(request_table_pane)
+            scanner_table = self.create_scanner_table(scanner_pane, issue_name, issue_param)
+            self.scanner_tables[key] = scanner_table
 
         request_table_pane.getViewport().setView(scanner_table)
         request_table_pane.revalidate()
         request_table_pane.repaint()
 
-    def create_scanner_pane(self, scanner_pane, issue_name, issue_param):
+    def create_scanner_table(self, scanner_pane, issue_name, issue_param):
         scanner_table_model = self.get_scanner_table_model(issue_name, issue_param)
 
         scanner_table = JTable(scanner_table_model)
@@ -303,15 +307,16 @@ class View:
 
         return scanner_table
 
-    def set_tabbed_pane(self, scanner_pane, request_list, issue_url, issue_name, issue_param):
+    def set_tabbed_pane(self, scanner_pane, request_list, issue_hostname, issue_path, issue_name, issue_param):
         tabbed_pane = scanner_pane.getBottomComponent()
         scanner_issues = self.get_scanner_issues()
 
         for scanner_issue in scanner_issues:
-            is_same_url = scanner_issue.getUrl() == issue_url
+            is_same_hostname = scanner_issue.getHostname() == issue_hostname
+            is_same_path = scanner_issue.getPath() == issue_path
             is_same_name = scanner_issue.getIssueName() == issue_name
             is_same_param = scanner_issue.getParameter() == issue_param
-            is_same_issue = is_same_url and is_same_name and is_same_param
+            is_same_issue = is_same_hostname and is_same_path and is_same_name and is_same_param
 
             if is_same_issue:
                 current_issue = scanner_issue
@@ -334,8 +339,8 @@ class View:
         advisory_pane.setContentType("text/html")
         link_listener = LinkListener()
         advisory_pane.addHyperlinkListener(link_listener)
-        fmt = "<html><b>Location</b>: {}<br><br>{}</html>"
-        advisory_pane.setText(fmt.format(scanner_issue.getUrl(),
+        advisory = "<html><b>Location</b>: {}<br><br>{}</html>"
+        advisory_pane.setText(advisory.format(scanner_issue.getUrl().encode("utf-8"),
                                          scanner_issue.getIssueDetail()))
 
         # Set a context menu
@@ -344,6 +349,7 @@ class View:
         return JScrollPane(advisory_pane)
 
     def set_request_tab_pane(self, scanner_issue):
+        '''
         raw_request = scanner_issue.getRequestResponse().getRequest()
         request_body = StringUtil.fromBytes(raw_request)
         request_body = request_body.encode("utf-8")
@@ -356,6 +362,13 @@ class View:
 
         # Set a context menu
         self.set_context_menu(component, scanner_issue)
+        '''
+
+        request_response = scanner_issue.getRequestResponse()
+        controller = MessageController(request_response)
+        message_editor = self.callbacks.createMessageEditor(controller, True)
+        message_editor.setMessage(request_response.getRequest(), True)
+        component = message_editor.getComponent()
 
         return component
 
@@ -374,6 +387,7 @@ class View:
 
         return component
 
+    # TODO: Remove this function and use the built-in Burp Suite context menu
     # Pass scanner_issue as argument
     def set_context_menu(self, component, scanner_issue):
         self.context_menu = JPopupMenu()
@@ -394,6 +408,70 @@ class View:
 
     def get_context_menu(self):
         return self.context_menu
+
+    def traverse_tree(self, tree, model, issue_name, issue_param, issue_count, total_count):
+        root = model.getRoot()
+        count = int(root.getChildCount())
+        traverse = {}
+
+        for i in range(count):
+            node = model.getChild(root, i)
+            traverse["node"] = node
+            tree_issue_name = node.toString()
+
+            is_issue_name = re.search(issue_name, tree_issue_name)
+
+            if is_issue_name:
+                child_count = node.getChildCount()
+
+                for j in range(child_count):
+                    child = node.getChildAt(j)
+                    traverse["child"] = child
+                    tree_param_name = child.toString()
+
+                    is_param_name = re.search(issue_param, tree_param_name)
+
+                    if is_param_name:
+                        traverse["param_text"] = issue_param + " (" + str(issue_count) + ")"
+                        break
+
+                traverse["issue_text"] = issue_name + " (" + str(total_count) + ")"
+                break
+
+        return traverse
+
+    def set_scanner_count(self, issue_name, issue_param, issue_count, total_count):
+        tree = self.get_tree()
+        model = tree.getModel()
+        traverse = self.traverse_tree(tree, model, issue_name, issue_param, issue_count, total_count)
+        node = traverse["node"]
+        child = traverse["child"]
+
+        print traverse["param_text"]
+        print traverse["issue_text"]
+
+        child.setUserObject(traverse["param_text"])
+        model.nodeChanged(child)
+        model.reload(node)
+
+        node.setUserObject(traverse["issue_text"])
+        model.nodeChanged(node)
+        model.reload(node)
+
+class MessageController(IMessageEditorController):
+    def __init__(self, request_response):
+        self._http_service = request_response.getHttpService()
+        self._request = request_response.getRequest()
+        self._response = request_response.getResponse()
+
+    def getHttpService(self):
+        return self._http_service
+
+    def getRequest(self):
+        return self._request
+
+    def getResponse(self):
+        return self._response
 
 class LinkListener(HyperlinkListener):
     def hyperlinkUpdate(self, hle):
@@ -422,7 +500,18 @@ class ScannerTableListener(TableModelListener):
         is_changed = e.getType() == e.UPDATE
 
         if is_changed:
-            self.view.set_scanner_count(is_checked, self.issue_name, self.issue_param)
+            self.view.get_issues_object().change_total_count(self.issue_name, is_checked)
+            self.view.get_issues_object().change_issues_count(self.issue_name, self.issue_param, is_checked)
+            issue_count = self.view.get_issues_object().get_issues_count(self.issue_name, self.issue_param)
+            total_count = self.view.get_issues_object().get_total_count(self.issue_name)
+
+            print self.issue_name + " " + self.issue_param + " " + str(issue_count) + " " + str(total_count)
+
+            if is_checked:
+                self.view.set_scanner_count(self.issue_name, self.issue_param, issue_count, total_count)
+            else:
+                self.view.set_scanner_count(self.issue_name, self.issue_param, issue_count, total_count)
+
 
 class ContextMenuListener(MouseAdapter):
     def __init__(self, component, context_menu):
@@ -529,12 +618,15 @@ class IssueListener(ListSelectionListener):
 
     def valueChanged(self, e):
         row = self.table.getSelectedRow()
-        url = self.table.getModel().getValueAt(row, 2)
-        self.view.set_tabbed_pane(self.scanner_pane, self.table, url, self.issue_name, self.issue_param)
+        issue_param = self.table.getModel().getValueAt(row, 1)
+        hostname = self.table.getModel().getValueAt(row, 2)
+        path = self.table.getModel().getValueAt(row, 3)
+        self.view.set_tabbed_pane(self.scanner_pane, self.table, hostname, path, self.issue_name, issue_param)
 
 class Issues:
     scanner_issues = []
     total_count = {}
+    issues_count = {}
 
     def __init__(self):
         self.set_json()
@@ -602,7 +694,8 @@ class Issues:
                     if is_same_vuln_name:
                         vuln_params.append({
                             "name": issue["name"],
-                            "param": issue["param"],
+                            "vuln_param": vuln_param,
+                            "param": parameter_decoded,
                             "value": parameter.getValue()
                         })
                     else:
@@ -621,7 +714,8 @@ class Issues:
                         if not is_real_word:
                             vuln_params.append({
                                 "name": issue["name"],
-                                "param": issue["param"],
+                                "vuln_param": vuln_param,
+                                "param": parameter_decoded,
                                 "value": parameter.getValue()
                             })
 
@@ -634,12 +728,14 @@ class Issues:
         # Takes into account if there is more than one vulnerable parameter
         for vuln_parameter in vuln_parameters:
             issue_name = vuln_parameter["name"]
+            vuln_param = vuln_parameter["vuln_param"]
             param_name = vuln_parameter["param"]
             param_value = vuln_parameter["value"]
 
             url = helpers.analyzeRequest(request_response).getUrl()
             url = urlparse.urlsplit(str(url))
             hostname = url.hostname
+            path = url.path
             url = url.scheme + "://" + url.hostname + url.path
 
             http_service = request_response.getHttpService()
@@ -652,12 +748,14 @@ class Issues:
             if is_dupe:
                 continue
 
-            scanner_issue = ScannerIssue(url, issue_name, param_name, param_value, http_service, http_messages, detail, severity, request_response)
+            scanner_issue = ScannerIssue(url, issue_name, param_name, vuln_param, param_value, hostname, path, http_service, http_messages, detail, severity, request_response)
             self.set_scanner_issues(scanner_issue)
-            issue_count = self.add_scanner_count(view, issue_name, param_name)
-            self.create_scanner_count(view, issue_name, param_name, issue_count, self.total_count[issue_name])
 
-            view.set_scanner_table_model(scanner_issue, issue_name, param_name)
+            issue_count = self.set_issue_count(issue_name, vuln_param)
+            total_count = self.total_count[issue_name]
+
+            view.set_scanner_count(issue_name, vuln_param, issue_count, total_count)
+            view.set_scanner_table_model(scanner_issue, issue_name, param_name, vuln_param)
 
     def check_duplicate_issue(self, hostname, issue_name, parameter, value):
         # TODO: Change to scanner_issues
@@ -676,8 +774,7 @@ class Issues:
 
         return False
 
-    # Refactor as same code is used in set_scanner_count()
-    def add_scanner_count(self, view, issue_name, issue_param):
+    def set_issue_count(self, issue_name, issue_param):
         for issue in self.issues:
             is_name = issue["name"] == issue_name
             is_param = issue["param"] == issue_param
@@ -685,167 +782,113 @@ class Issues:
 
             if is_issue:
                 issue["count"] += 1
-                is_key_exists = issue_name in self.total_count
+                is_total_key_exists = issue_name in self.total_count
 
-                if is_key_exists:
+                if is_total_key_exists:
                     self.total_count[issue_name] += 1
                 else:
                     self.total_count[issue_name] = 1
 
+                key = issue_name + "." + issue_param
+                is_issue_key_exists = key in self.issues_count
+
+                if is_issue_key_exists:
+                    self.issues_count[key] += 1
+                else:
+                    self.issues_count[key] = 1
+
                 return issue["count"]
 
-    def create_scanner_count(self, view, issue_name, issue_param, issue_count, total_count):
-        tree = view.get_tree()
-        model = tree.getModel()
-        root = model.getRoot()
-        count = int(root.getChildCount())
+    def get_issues_count(self, issue_name, issue_param):
+        key = issue_name + "." + issue_param
+        return self.issues_count[key]
 
-        # TODO: Refactor into one function that just takes nodes
-        # Iterates through each vulnerability class leaf node in tree
-        for i in range(count):
-            node = model.getChild(root, i)
-            tree_issue_name = node.toString()
+    def change_issues_count(self, issue_name, issue_param, is_checked):
+        key = issue_name + "." + issue_param
 
-            is_issue_name = re.search(issue_name, tree_issue_name)
+        if is_checked:
+            self.issues_count[key] -= 1
+        else:
+            self.issues_count[key] += 1
 
-            if is_issue_name:
-                child_count = node.getChildCount()
+    def get_total_count(self, issue_name):
+        return self.total_count[issue_name]
 
-                # TODO: Refactor into one function that just takes nodes
-                # Iterates through each parameter leaf node vulnerability class
-                for j in range(child_count):
-                    child = node.getChildAt(j)
-                    tree_param_name = child.toString()
-
-                    is_param_name = re.search(issue_param, tree_param_name)
-
-                    # Change the display of each parameter leaf node based on
-                    # how many issues are found
-                    if is_param_name:
-                        param_text = issue_param + " (" + str(issue_count) + ")"
-
-                        child.setUserObject(param_text)
-                        model.nodeChanged(child)
-                        model.reload(node)
-
-                        break
-
-                issue_text = issue_name + " (" + str(total_count) + ")"
-
-                node.setUserObject(issue_text)
-                model.nodeChanged(node)
-                model.reload(node)
-
-                break
-
-    def set_scanner_count(self, view, is_checked, issue_name, issue_param):
-        tree = view.get_tree()
-        model = tree.getModel()
-        root = model.getRoot()
-        count = int(root.getChildCount())
-
-        for i in range(count):
-            node = model.getChild(root, i)
-            tree_issue_name = node.toString()
-
-            is_issue_name = re.search(issue_name, tree_issue_name)
-
-            if is_issue_name:
-                child_count = node.getChildCount()
-
-                # TODO: Refactor into one function that just takes nodes
-                # Iterates through each parameter leaf node vulnerability class
-                for j in range(child_count):
-                    child = node.getChildAt(j)
-                    tree_param_name = child.toString()
-
-                    is_param_name = re.search(issue_param, tree_param_name)
-
-                    # Change the display of each parameter leaf node based on
-                    # how many issues are found
-                    if is_param_name:
-                        param_count = int(re.search(r'(\d+)', tree_param_name).group(1))
-
-                        if is_checked:
-                            param_text = issue_param + " (" + str(param_count - 1) + ")"
-                        else:
-                            param_text = issue_param + " (" + str(param_count + 1) + ")"
-
-                        child.setUserObject(param_text)
-                        model.nodeChanged(child)
-                        model.reload(child)
-
-                        break
-
-                total_count = int(re.search(r'(\d+)', tree_issue_name).group(1))
-
-                if is_checked:
-                    issue_text = issue_name + " (" + str(total_count - 1) + ")"
-                else:
-                    issue_text = issue_name + " (" + str(total_count + 1) + ")"
-
-                node.setUserObject(issue_text)
-                model.nodeChanged(node)
-                model.reload(node)
-
-                break
+    def change_total_count(self, issue_name, is_checked):
+        if is_checked:
+            self.total_count[issue_name] -= 1
+        else:
+            self.total_count[issue_name] += 1
 
 # TODO: Fill out all the getters with proper returns
 class ScannerIssue(IScanIssue):
-    def __init__(self, url, issue_name, parameter, param_value, http_service, http_messages, detail, severity, request_response):
-        self.current_url = url
-        self.http_service = http_service
-        self.http_messages = http_messages
-        self.detail = detail.replace("$param$", parameter)
-        self.current_severity = severity
-        self.request_response = request_response
-        self.issue_background = "Bugcrowd"
-        self.issue_name = issue_name
-        self.parameter = parameter
-        self.param_value = param_value
-        self.remediation_background = ""
+    def __init__(self, url, issue_name, parameter, vuln_param, param_value, hostname, path, http_service, http_messages, detail, severity, request_response):
+        self._url = url
+        self._http_service = http_service
+        self._http_messages = http_messages
+        detail = detail.encode("utf-8")
+        self._detail = detail.replace("$param$", parameter.encode("utf-8"))
+        self._current_severity = severity
+        self._request_response = request_response
+        self._issue_background = ""
+        self._issue_name = issue_name
+        self._parameter = parameter
+        self._vuln_param = vuln_param
+        self._hostname = hostname
+        self._path = path
+        self._param_value = param_value
+        self._remediation_background = ""
 
     def getRequestResponse(self):
-        return self.request_response
+        return self._request_response
+
+    def getVulnParameter(self):
+        return self._vuln_param
 
     def getParameter(self):
-        return self.parameter
+        return self._parameter
 
     def getParameterValue(self):
-        return self.param_value
+        return self._param_value
+
+    def getHostname(self):
+        return self._hostname
+
+    def getPath(self):
+        return self._path
 
     def getUrl(self):
-        return self.current_url
+        return self._url
 
     def getIssueName(self):
-        return self.issue_name
+        return self._issue_name
 
     def getIssueType(self):
         return 0
 
     def getSeverity(self):
-        return self.current_severity
+        return self._current_severity
 
     def getConfidence(self):
         return "Certain"
 
     def getIssueBackground(self):
-        return self.issue_background
+        return self._issue_background
 
     def getRemediationBackground(self):
-        return self.remediation_background
+        return self._remediation_background
 
     def getIssueDetail(self):
-        return self.detail
+        return self._detail
 
     def getRemediationDetail(self):
         return None
 
     def getHttpMessages(self):
-        return self.http_messages
+        return self._http_messages
 
     def getHttpService(self):
-        return self.http_service
+        return self._http_service
 
 if __name__ in ('__main__', 'main'):
     EventQueue.invokeLater(Run(BurpExtender))
